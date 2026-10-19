@@ -1,0 +1,262 @@
+import hashlib
+import sqlite3
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+TOKEN = "8816129534:AAFJ7PvV52iD-1ogRdYcShhchZ8YMdQJves"
+ADMIN_ID = 8793623414
+ADMIN_USERNAME = "minhhoang881"
+
+conn = sqlite3.connect("bot_taixiu.db", check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    balance INTEGER DEFAULT 0
+)
+""")
+conn.commit()
+
+
+def get_or_create_user(user_id: int, username: str):
+    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    if row is None:
+        cursor.execute(
+            "INSERT INTO users (user_id, username, balance) VALUES (?, ?, ?)",
+            (user_id, username, 0),
+        )
+        conn.commit()
+        return 0
+    return row[0]
+
+
+def update_balance(user_id: int, amount: int):
+    cursor.execute(
+        "UPDATE users SET balance = balance + ? WHERE user_id = ?",
+        (amount, user_id),
+    )
+    conn.commit()
+
+
+def analyze_taixiu_md5(md5_str: str):
+    clean_str = md5_str.strip().lower()
+
+    if len(clean_str) == 64:
+        clean_str = hashlib.md5(clean_str.encode("utf-8")).hexdigest()
+
+    sub_hex = clean_str[-8:]
+    dec_val = int(sub_hex, 16)
+
+    tai_percent = round(15.0 + (dec_val % 7001) / 100.0, 1)
+    xiu_percent = round(100.0 - tai_percent, 1)
+
+    if tai_percent > xiu_percent:
+        recommend = f"🔴 TÀI ({tai_percent}%) - Cửa Sáng 🌟"
+    elif xiu_percent > tai_percent:
+        recommend = f"🔵 XỈU ({xiu_percent}%) - Cửa Sáng 🌟"
+    else:
+        recommend = "⚖️ CÂN CỬA (NÊN BỎ QUA)"
+
+    return tai_percent, xiu_percent, recommend
+
+
+def make_progress_bar(percent: float):
+    blocks = int(percent // 10)
+    bar = "█" * blocks + "░" * (10 - blocks)
+    return f"[{bar}]"
+
+
+def get_main_keyboard():
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "📜 Hướng Dẫn Soi Cầu", callback_data="guide_md5"
+            ),
+            InlineKeyboardButton("💳 Mua / Nạp Xu", callback_data="buy_xu"),
+        ],
+        [
+            InlineKeyboardButton(
+                "👨‍💻 Liên Hệ Admin Hỗ Trợ",
+                url=f"https://t.me/{ADMIN_USERNAME}",
+            )
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    balance = get_or_create_user(user.id, user.username)
+
+    msg = (
+        f"🎲 **HỆ THỐNG PHÂN TÍCH TÀI XỈU MD5** 🎲\n"
+        f"═══════════════════════════\n"
+        f"👋 Xin chào: **{user.full_name}**\n"
+        f"🆔 ID của bạn: `{user.id}`\n"
+        f"💰 Số dư ví: **{balance} xu**\n"
+        f"═══════════════════════════\n"
+        f"📌 *Gửi trực tiếp chuỗi mã MD5 (32 hoặc 64 ký tự) vào đây để bot tiến hành phân tích tỷ lệ.*"
+    )
+    await update.message.reply_text(
+        msg, parse_mode="Markdown", reply_markup=get_main_keyboard()
+    )
+
+
+async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    balance = get_or_create_user(user.id, user.username)
+    await update.message.reply_text(
+        f"💼 **THÔNG TIN TÀI KHOẢN**\n"
+        f"═══════════════════════════\n"
+        f"🆔 ID: `{user.id}`\n"
+        f"💰 Số dư hiện tại: **{balance} xu**",
+        parse_mode="Markdown",
+        reply_markup=get_main_keyboard(),
+    )
+
+
+async def add_xu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text(
+            "❌ Bạn không có quyền sử dụng lệnh này."
+        )
+        return
+    try:
+        target_id = int(context.args[0])
+        amount = int(context.args[1])
+        update_balance(target_id, amount)
+        await update.message.reply_text(
+            f"✅ Đã cộng thành công **{amount} xu** cho ID: `{target_id}`",
+            parse_mode="Markdown",
+        )
+    except (IndexError, ValueError):
+        await update.message.reply_text(
+            "⚠️ Cú pháp: `/nap <User_ID> <Số_xu>`", parse_mode="Markdown"
+        )
+
+
+async def sub_xu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text(
+            "❌ Bạn không có quyền sử dụng lệnh này."
+        )
+        return
+    try:
+        target_id = int(context.args[0])
+        amount = int(context.args[1])
+        update_balance(target_id, -amount)
+        await update.message.reply_text(
+            f"✅ Đã trừ **{amount} xu** của ID: `{target_id}`",
+            parse_mode="Markdown",
+        )
+    except (IndexError, ValueError):
+        await update.message.reply_text(
+            "⚠️ Cú pháp: `/tru <User_ID> <Số_xu>`", parse_mode="Markdown"
+        )
+
+
+async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+
+    if query.data == "guide_md5":
+        await query.message.reply_text(
+            "📜 **HƯỚNG DẪN SỬ DỤNG**\n\n"
+            "1️⃣ Copy mã kết quả MD5 từ cổng game Tài Xỉu.\n"
+            "2️⃣ Dán trực tiếp mã đó vào khung chat của bot này.\n"
+            "3️⃣ Mỗi lần phân tích hệ thống sẽ tự động trừ **1 xu**.\n"
+            "4️⃣ Liên hệ Admin để nạp thêm xu khi tài khoản hết tiền.",
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard(),
+        )
+    elif query.data == "buy_xu":
+        await query.message.reply_text(
+            f"💳 **NẠP XU TÀI XỈU MD5**\n\n"
+            f"🆔 ID của bạn: `{user_id}`\n"
+            f"📩 Vui lòng gửi ID này cho Admin **@{ADMIN_USERNAME}** để được duyệt nạp xu nhanh chóng!",
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard(),
+        )
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = update.message.text.strip()
+    balance = get_or_create_user(user.id, user.username)
+
+    if len(text) not in [32, 64] or not all(
+        c in "0123456789abcdefABCDEF" for c in text
+    ):
+        return
+
+    if balance < 1:
+        await update.message.reply_text(
+            f"❌ **Tài khoản đã hết xu!**\n"
+            f"🆔 ID: `{user.id}` | 💰 Số dư: `0 xu`\n\n"
+            f"Vui lòng nhấn nút **Mua / Nạp Xu** hoặc liên hệ @{ADMIN_USERNAME} để nạp thêm.",
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard(),
+        )
+        return
+
+    update_balance(user.id, -1)
+    new_balance = balance - 1
+
+    tai_p, xiu_p, recommend = analyze_taixiu_md5(text)
+    bar_tai = make_progress_bar(tai_p)
+    bar_xiu = make_progress_bar(xiu_p)
+
+    report = (
+        f"📊 **PHÂN TÍCH KẾT QUẢ TÀI XỈU MD5**\n"
+        f"═══════════════════════════\n"
+        f"🔑 **Mã:** `{text[:10]}...{text[-6:]}`\n\n"
+        f"🔴 **TÀI:** `{tai_p}%`\n{bar_tai}\n\n"
+        f"🔵 **XỈU:** `{xiu_p}%`\n{bar_xiu}\n"
+        f"═══════════════════════════\n"
+        f"🎯 **KHUYẾN NGHỊ:** {recommend}\n"
+        f"═══════════════════════════\n"
+        f"🆔 ID: `{user.id}` | 💰 Còn lại: **{new_balance} xu**"
+    )
+
+    await update.message.reply_text(
+        report, parse_mode="Markdown", reply_markup=get_main_keyboard()
+    )
+
+
+def main():
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .connect_timeout(30.0)
+        .read_timeout(30.0)
+        .write_timeout(30.0)
+        .build()
+    )
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("xemxu", check_balance))
+    app.add_handler(CommandHandler("nap", add_xu))
+    app.add_handler(CommandHandler("tru", sub_xu))
+
+    app.add_handler(CallbackQueryHandler(button_click))
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+    )
+
+    print("🤖 Bot Tài Xỉu MD5 đang chạy trên Cloud...")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()

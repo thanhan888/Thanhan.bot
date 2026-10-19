@@ -1,2 +1,0 @@
-# Thanhan.bot
-On
